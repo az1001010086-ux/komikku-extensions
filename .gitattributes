@@ -1,0 +1,12 @@
+# 产物分支（repo）的 JSON 必须是 LF —— 与 Linux 侧生成的一致，
+# 避免本地 CRLF / 线上 LF 造成的「本地线上字节不一致」困惑。
+# 注意：本文件对 main 分支的源码同样生效（源码用 LF 也是社区惯例）。
+*.json  text eol=lf
+*.md    text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+
+# APK / PNG 是二进制，不做任何换行转换（否则会损坏文件）
+*.apk   binary
+*.png   binary
+*.jar   binary

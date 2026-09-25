@@ -160,16 +160,18 @@ def main() -> int:
             print(f"   - {p}", file=sys.stderr)
         return 1
 
-    (OUT / "index.min.json").write_text(
-        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 用 write_bytes 显式写 LF —— 若用 write_text，Windows 上会落成 CRLF，
+    # 与线上（git 归一化成 LF）字节不一致，徒增排查成本。
+    (OUT / "index.min.json").write_bytes(
+        json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8"))
 
     # ⚠️ index_v2 若填值，App 会当完整 URL 再 fetch（ExtensionStoreService.kt:58-59），
     #    填相对路径 ⇒ OkHttp 报 "no scheme was found"。legacy 仓库必须填 null。
     # ⚠️ 字段无默认值，即使 explicitNulls=false 也必须显式写出这个 key。
-    (OUT / "repo.json").write_text(
+    (OUT / "repo.json").write_bytes(
         json.dumps({"index_v2": None, "meta": {
             **REPO_META, "signingKeyFingerprint": SIGNING_KEY,
-        }}, ensure_ascii=False, indent=2), encoding="utf-8")
+        }}, ensure_ascii=False, indent=2).encode("utf-8"))
 
     print(f"产物已生成：{OUT}")
     for p in sorted(OUT.rglob("*")):
