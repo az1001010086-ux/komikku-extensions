@@ -46,6 +46,18 @@ REPO_META = {
 # apk_path 相对于仓库根；构建后它会出现在 extensions/<lang>/<mod>/build/outputs/apk/release/
 EXTENSIONS = [
     {
+        "pkg": "eu.kanade.tachiyomi.extension.zh.kxmanhua",
+        "source_name": "开心看漫画",          # 图源页主名
+        "lang": "zh",
+        "code": 106001,                     # ★ 必须与 APK 的 versionCode 一致
+        "version": "1.6.1",                 # ★ 必须与 APK 的 versionName 一致
+        "nsfw": 1,                          # 站点为成人向 ⇒ 标记 NSFW（0=SAFE 1=NSFW）
+        "base_url": "https://kxmanhua.com",
+        "apk": "extensions/zh/kxmanhua/build/outputs/apk/release/"
+               "tachiyomi-zh.kxmanhua-v1.6.1.apk",
+        "icon": "extensions/zh/kxmanhua/res/mipmap-xxxhdpi/ic_launcher.png",
+    },
+    {
         "pkg": "eu.kanade.tachiyomi.extension.zh.tutorialdemo",
         "source_name": "教程示例",          # 图源页主名（可中文）
         "lang": "zh",
