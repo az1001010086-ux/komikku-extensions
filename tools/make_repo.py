@@ -61,12 +61,13 @@ EXTENSIONS = [
         "pkg": "eu.kanade.tachiyomi.extension.zh.kmh",
         "source_name": "K漫画",              # 图源页主名
         "lang": "zh",
-        "code": 106001,                     # ★ 必须与 APK 的 versionCode 一致
-        "version": "1.6.1",                 # ★ 必须与 APK 的 versionName 一致
+        "code": 106002,                     # ★ 必须与 APK 的 versionCode 一致
+        "version": "1.6.2",                 # ★ 必须与 APK 的 versionName 一致
+                                            #   （106002/1.6.2 = 修「章节/图片恒为空」后的重发）
         "nsfw": 1,                          # 站点为成人向 ⇒ 标记 NSFW（0=SAFE 1=NSFW）
         "base_url": "https://kmh001.com",
         "apk": "extensions/zh/kmh/build/outputs/apk/release/"
-               "tachiyomi-zh.kmh-v1.6.1.apk",
+               "tachiyomi-zh.kmh-v1.6.2.apk",
         "icon": "extensions/zh/kmh/res/mipmap-xxxhdpi/ic_launcher.png",
     },
     {

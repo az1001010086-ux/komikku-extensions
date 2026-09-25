@@ -215,7 +215,13 @@ class Kmh(
      */
     private fun Document.parseChapters(): List<SChapter> {
         val payload = rscPayload() ?: return emptyList()
-        val arrayText = CHAPTER_DATA.find(payload)?.groupValues?.get(1) ?: return emptyList()
+        val match = CHAPTER_DATA.find(payload) ?: return emptyList()
+        // ★ 必须从匹配到的 `[` 的**真实位置**起截取到结尾，再交给 extractJsonObjects。
+        //   ❌ 曾经的致命 bug：传 `match.groupValues[1]`（那只是捕获组里的单个 `"["` 字符）
+        //      ⇒ extractJsonObjects 找不到配对 `]` ⇒ 恒空 ⇒ App 里永远没有章节。
+        //   ⚠️ 这个 bug 当初没被脚本抓到，因为脚本用的是 `payload.find(...)` 真实下标、
+        //      与 Kotlin 实现**不一致**。教训：验证脚本必须与 .kt **逐句同构**。
+        val arrayText = payload.substring(match.range.first)
 
         return extractJsonObjects(arrayText)
             .mapNotNull { obj ->
@@ -256,7 +262,9 @@ class Kmh(
         val doc = client.get(chapterUrl(chapter), imgHeaders).asJsoup()
         val payload = doc.rscPayload() ?: return emptyList()
 
-        val arrayText = IMAGES_ARRAY.find(payload)?.groupValues?.get(1) ?: return emptyList()
+        val match = IMAGES_ARRAY.find(payload) ?: return emptyList()
+        // ★ 同 parseChapters：必须从 `[` 的真实位置起截取（勿传捕获组）。
+        val arrayText = payload.substring(match.range.first)
 
         return extractJsonObjects(arrayText)
             .mapNotNull { obj ->
