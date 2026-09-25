@@ -77,8 +77,14 @@ git worktree add --detach "$WT" ${BASE:-HEAD} >/dev/null 2>&1
     # 铺入产物 → 即在分支根目录
     cp -r "$ROOT/$DIST/." .
     git add -Af .
-    git commit -q -m "chore(repo): 更新扩展索引 $(date '+%Y-%m-%d %H:%M')"
-    echo "    新提交：$(git rev-parse --short HEAD)  $(git rev-parse HEAD)"
+    # 内容无变化时 commit 会失败（幂等重跑的正常情形），不能让它中断脚本
+    if git diff --cached --quiet; then
+        echo "    产物与 $BRANCH 分支当前内容一致，无需新提交"
+        echo "    当前提交：$(git rev-parse --short HEAD)"
+    else
+        git commit -q -m "chore(repo): 更新扩展索引 $(date '+%Y-%m-%d %H:%M')"
+        echo "    新提交：$(git rev-parse --short HEAD)  $(git rev-parse HEAD)"
+    fi
     echo "    分支内容："
     git ls-tree -r --name-only HEAD | sed 's/^/      /'
 )
