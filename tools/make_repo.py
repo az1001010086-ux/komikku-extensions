@@ -74,12 +74,13 @@ EXTENSIONS = [
         "pkg": "eu.kanade.tachiyomi.extension.zh.hanmanwu",
         "source_name": "韩漫屋",              # 图源页主名
         "lang": "zh",
-        "code": 106001,                     # ★ 必须与 APK 的 versionCode 一致
-        "version": "1.6.1",                 # ★ 必须与 APK 的 versionName 一致
+        "code": 106002,                     # ★ 必须与 APK 的 versionCode 一致
+        "version": "1.6.2",                 # ★ 必须与 APK 的 versionName 一致
+                                            #   （106002/1.6.2 = 加登录功能后的重发）
         "nsfw": 1,                          # 站点为成人向 ⇒ 标记 NSFW（0=SAFE 1=NSFW）
         "base_url": "https://hmanwu.com",
         "apk": "extensions/zh/hanmanwu/build/outputs/apk/release/"
-               "tachiyomi-zh.hanmanwu-v1.6.1.apk",
+               "tachiyomi-zh.hanmanwu-v1.6.2.apk",
         "icon": "extensions/zh/hanmanwu/res/mipmap-xxxhdpi/ic_launcher.png",
     },
     {

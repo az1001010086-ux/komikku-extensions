@@ -1,5 +1,9 @@
 package eu.kanade.tachiyomi.extension.zh.hanmanwu
 
+import android.content.SharedPreferences
+import androidx.preference.EditTextPreference
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -9,11 +13,17 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.io.IOException
@@ -29,14 +39,18 @@ import java.io.IOException
  *  - 列表/搜索/筛选：`/api/comics?page&page_size&q&category&tag&sort&crawl_status`
  *  - 详情+章节：`/api/comics/{id}/detail`（一次全拿）
  *  - 章节图片：`/api/chapters/{id}/read`
+ *  - 登录：`/api/auth/login`（用户名 + 密码换 JWT）
  *  - 封面/图片：R2 图床，**无防盗链**（裸请求即 200）
  *
  * ⚠️⚠️ 本扩展的**唯一硬约束**：章节图片匿名**每天只能读 2 次**（按 IP 计，重复读同章也扣）。
- *   登录（`/api/auth/login`）后无限制。本版本**先交付匿名版**，
- *   未登录时读图超限会给出可读错误提示，引导用户去插件设置里登录（登录支持留待下一版）。
+ *   登录后无限制 ⇒ 本版实现了**自动登录**：在「扩展设置」里填一次账号密码，
+ *   之后取图时会自动换取 token（30 天有效）并缓存到本机，全程无需再操作。
  *
  * ⚠️ HTTP 状态码**恒为 200**，业务状态在 body 的 `code` 字段（200 成功 / 403 额度耗尽 / 400 不存在）
  *   ⇒ 必须显式判 `code`，否则失败会静默变成"空图片列表"。
+ *
+ * ⚠️ 但有两个**例外**：额度耗尽时站点**会**返回 real HTTP 403，登录失败返回 real HTTP 401
+ *   ⇒ 所有需要读 body 的请求都必须 `ensureSuccess = false`。
  */
 @Source
 class Hanmanwu(
@@ -44,7 +58,8 @@ class Hanmanwu(
     override val lang: String,
     override val id: Long,
     override val baseUrl: String,
-) : KeiSource() {
+) : KeiSource(),
+    ConfigurableSource {
 
     // ============================ 1. 列表页 ============================
 
@@ -168,19 +183,28 @@ class Hanmanwu(
      *              "image_url":"https://pub-….r2.dev/6355/43877/2443601.jpg"}, …]}}
      * ```
      *
-     * ⚠️ 三种非成功情形必须区分开（否则用户看到的只是"空章节"）：
-     *  - `code == 403` ⇒ 匿名额度耗尽 ⇒ 提示去插件设置登录（**可读文案，不是解析失败**）
+     * ⚠️ 非成功情形必须区分开（否则用户看到的只是"空章节"）：
+     *  - `code == 403` ⇒ 匿名额度耗尽，或所带 token 已失效被降级为匿名
      *  - `code == 400` ⇒ 章节不存在
      *  - `code == 200` 但 `images` 为空 ⇒ 该章尚未爬取（`crawl_status == 0`）
      */
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterId = chapterIdOf(chapter)
+        val url = "$baseUrl/api/chapters/$chapterId/read"
 
-        val dto = client.get("$baseUrl/api/chapters/$chapterId/read", headers)
-            .parseAs<ListResponse<ReadData>>()
+        val seenTokenVersion = tokenVersion
+        var dto = fetchRead(url)
+
+        // ★ 403 有两种成因，且响应体**完全一样**、无法区分：
+        //   (a) 压根没登录（或没配账号）⇒ 匿名额度真的用完了；
+        //   (b) 带了 token，但 token 已失效 ⇒ 服务端**降级为匿名**，于是撞上额度闸。
+        //   ⇒ 只要配置了账号，就强制刷新一次 token 再重试（幂等，最多多一次登录请求）。
+        if (dto.code == 403) {
+            retryAfterRelogin(url, seenTokenVersion)?.let { dto = it }
+        }
 
         when (dto.code) {
-            403 -> throw IOException(MSG_NEED_LOGIN)
+            403 -> throw IOException(needLoginMessage())
             400 -> throw IOException("章节不存在（可能已被站点下架）")
 
             else -> dto.throwOnError()
@@ -196,7 +220,200 @@ class Hanmanwu(
             .mapIndexed { i, img -> Page(i, imageUrl = img.imageUrl) }
     }
 
-    // ====================== 4. URL 组装 / 解析 ======================
+    /**
+     * 读图请求。
+     *
+     * ★★ `ensureSuccess = false` 是**必须的**：站点在额度耗尽时会返回 **real HTTP 403**，
+     *   若用默认的 `ensureSuccess = true`，`awaitSuccess()` 会先抛 `HttpException`，
+     *   我们就永远读不到 body 里的 `code`/`message`，那条可读的中文提示也就永远显示不出来。
+     */
+    private suspend fun fetchRead(url: String): ListResponse<ReadData> = client.get(url, authHeaders(), ensureSuccess = false).parseAs()
+
+    /**
+     * 403 兜底：刷新 token 后用新 token 重试一次。
+     *
+     * @param seenTokenVersion 调用方发起请求时观察到的 token 版本号。
+     * @return 重试后的响应；`null` 表示不重试（未配账号 / 处于冷却期）。
+     */
+    private suspend fun retryAfterRelogin(url: String, seenTokenVersion: Long): ListResponse<ReadData>? {
+        if (!hasCredentials()) return null
+
+        val shouldRetry = loginMutex.withLock {
+            // 等锁期间别人已经把 token 刷新成可用的了 ⇒ 直接用新 token 重试，不必再登录一次。
+            // ⚠️ 必须同时要求「有可用 token」：`clearToken()` 也会改版本号，
+            //   若只看版本号，token 被清空的瞬间会误判成"已刷新"。
+            if (tokenVersion != seenTokenVersion && currentToken() != null) return@withLock true
+
+            // 冷却期内不重复登录：避免批量下载时对每一章都发一次登录请求。
+            val now = System.currentTimeMillis()
+            if (now - lastForceReloginAt < RELOGIN_COOLDOWN_MS) return@withLock false
+            lastForceReloginAt = now
+
+            clearToken()
+            login() != null
+        }
+
+        return if (shouldRetry) fetchRead(url) else null
+    }
+
+    // ====================== 4. 登录 / token 管理 ======================
+
+    /**
+     * 偏好页。**这是本扩展唯一的用户可见配置入口**（宿主 `SourcePreferencesScreen`
+     * 仅在 `source is ConfigurableSource` 时调用本方法）。
+     *
+     * ⚠️ 只能使用 `extensions-lib` 暴露的偏好控件子集（`EditTextPreference` /
+     *   `ListPreference` / `CheckBoxPreference`…），**纯文本 `Preference` 不可用**
+     *   （stub 里没有 `(Context)` 构造器）⇒ 说明文字放在 `dialogMessage` / `summary` 里。
+     *
+     * ⚠️ 宿主会把偏好页的 dataStore 指到 `source.sourcePreferences()`
+     *   = `getSharedPreferences("source_$id", MODE_PRIVATE)`，
+     *   与 [getPreferencesLazy] 拿到的**是同一个文件** ⇒ 两边读写完全一致。
+     */
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        EditTextPreference(screen.context).apply {
+            key = PREF_USERNAME
+            title = PREF_USERNAME_TITLE
+            dialogTitle = PREF_USERNAME_TITLE
+            dialogMessage = PREF_ACCOUNT_HINT
+            summary = PREF_ACCOUNT_SUMMARY
+            setDefaultValue("")
+
+            setOnBindEditTextListener { it.setHorizontallyScrolling(true) }
+
+            // 账号一改，旧 token 立即作废（下次取图会自动用新账号登录）。
+            setOnPreferenceChangeListener { _, _ ->
+                clearToken()
+                true
+            }
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = PREF_PASSWORD
+            title = PREF_PASSWORD_TITLE
+            dialogTitle = PREF_PASSWORD_TITLE
+            dialogMessage = PREF_PASSWORD_HINT
+            summary = PREF_PASSWORD_SUMMARY
+            setDefaultValue("")
+
+            setOnPreferenceChangeListener { _, _ ->
+                clearToken()
+                true
+            }
+        }.also(screen::addPreference)
+    }
+
+    private val preferences: SharedPreferences by getPreferencesLazy()
+
+    /** 每次成功写入 token 都自增，用于识别「token 是否已被别人刷新过」。 */
+    @Volatile
+    private var tokenVersion = 0L
+
+    /** 上次「因 403 而强制重登」的时刻，用于冷却节流。 */
+    @Volatile
+    private var lastForceReloginAt = 0L
+
+    /** 最近一次登录失败的原因（用于把可读文案带回给用户）。 */
+    @Volatile
+    private var lastLoginError: String? = null
+
+    /** 保证同一时刻只有一次登录在飞。 */
+    private val loginMutex = Mutex()
+
+    private fun hasCredentials(): Boolean {
+        val prefs = preferences
+        return !prefs.getString(PREF_USERNAME, null).isNullOrBlank() &&
+            !prefs.getString(PREF_PASSWORD, null).isNullOrBlank()
+    }
+
+    /** 取缓存中仍然有效的 token（本地按 29 天过期，比服务端的 30 天保守 1 天）。 */
+    private fun currentToken(): String? {
+        val prefs = preferences
+        val token = prefs.getString(PREF_TOKEN, null)
+        if (token.isNullOrBlank()) return null
+        if (System.currentTimeMillis() >= prefs.getLong(PREF_TOKEN_EXP, 0L)) return null
+        return token
+    }
+
+    /** 给请求头附上 `Authorization: Bearer <token>`；无可用 token 时原样返回。 */
+    private suspend fun authHeaders(): Headers {
+        val token = ensureToken() ?: return headers
+        return headers.newBuilder().set("Authorization", "Bearer $token").build()
+    }
+
+    /** 确保有可用 token：优先用缓存，其次（有账号时）自动登录。 */
+    private suspend fun ensureToken(): String? {
+        currentToken()?.let { return it }
+        if (!hasCredentials()) return null
+
+        return loginMutex.withLock {
+            // 双检：等锁期间可能已被其他协程登录成功。
+            currentToken() ?: login()
+        }
+    }
+
+    /**
+     * 用偏好里的账号密码换 token，并缓存到本机。
+     *
+     * 调用方必须已持有 [loginMutex]。
+     *
+     * ⚠️ 登录失败返回 **real HTTP 401**（不是 body 里的 code）⇒ 必须 `ensureSuccess = false`，
+     *   否则读不到 `{"code":401,"message":"用户名或密码错误"}`。
+     */
+    private suspend fun login(): String? {
+        val prefs = preferences
+        val username = prefs.getString(PREF_USERNAME, null)?.trim().orEmpty()
+        val password = prefs.getString(PREF_PASSWORD, null).orEmpty()
+        if (username.isEmpty() || password.isEmpty()) return null
+
+        val dto = try {
+            client.post(
+                "$baseUrl/api/auth/login",
+                headers,
+                LoginRequest(username, password).toJsonRequestBody(),
+                ensureSuccess = false,
+            ).parseAs<ListResponse<LoginData>>()
+        } catch (e: Exception) {
+            lastLoginError = e.message ?: e.javaClass.simpleName
+            return null
+        }
+
+        val token = dto.data?.token
+        if (dto.code != 200 || token.isNullOrBlank()) {
+            lastLoginError = dto.message.ifBlank { "登录失败（错误码 ${dto.code}）" }
+            clearToken()
+            return null
+        }
+
+        lastLoginError = null
+        prefs.edit()
+            .putString(PREF_TOKEN, token)
+            .putLong(PREF_TOKEN_EXP, System.currentTimeMillis() + TOKEN_TTL_MS)
+            .apply()
+        tokenVersion++
+
+        return token
+    }
+
+    private fun clearToken() {
+        preferences.edit()
+            .remove(PREF_TOKEN)
+            .remove(PREF_TOKEN_EXP)
+            .apply()
+        tokenVersion++
+    }
+
+    /** 403 时的提示文案；若刚刚登录失败过，把原因一并带上（否则用户会一头雾水）。 */
+    private fun needLoginMessage(): String {
+        val err = lastLoginError
+        return if (err.isNullOrBlank()) {
+            MSG_NEED_LOGIN
+        } else {
+            "$MSG_NEED_LOGIN\n（自动登录失败：$err）"
+        }
+    }
+
+    // ====================== 5. URL 组装 / 解析 ======================
 
     /**
      * `manga.url` = comicId（纯数字）。
@@ -234,7 +451,7 @@ class Hanmanwu(
         }
     }
 
-    // ============================ 5. 筛选器 ============================
+    // ============================ 6. 筛选器 ============================
 
     /**
      * ⚠️ `KeiSource.getFilterList()` 是 **final**（框架内部用它做筛选数据缓存），
@@ -246,7 +463,7 @@ class Hanmanwu(
         CategoryInput(),
         TagInput(),
         Filter.Separator(),
-        Filter.Header("章节图片需登录站点账号（登录支持开发中）"),
+        Filter.Header("章节图片需登录站点账号：在「扩展设置」填一次账号密码即可"),
         Filter.Header("未登录时每天仅可免费阅读 2 次"),
     )
 
@@ -315,6 +532,18 @@ class Hanmanwu(
     @Serializable
     private data class ReadData(
         val images: List<ImageDto> = emptyList(),
+    )
+
+    @Serializable
+    private data class LoginRequest(
+        val username: String,
+        val password: String,
+    )
+
+    /** 登录成功时 `data` 里还带 `user` 对象，本扩展用不到（`ignoreUnknownKeys` 会忽略）。 */
+    @Serializable
+    private data class LoginData(
+        val token: String = "",
     )
 
     @Serializable
@@ -398,8 +627,36 @@ class Hanmanwu(
         /** 每页条数（站点默认 30，实测 20/3 等任意值均生效）。 */
         const val PAGE_SIZE = 30
 
+        // ---- 偏好键 ----
+        const val PREF_USERNAME = "hanmanwu_username"
+        const val PREF_PASSWORD = "hanmanwu_password"
+
+        /** token 与过期时刻只写不展示（不给它们建偏好项）。 */
+        const val PREF_TOKEN = "hanmanwu_token"
+        const val PREF_TOKEN_EXP = "hanmanwu_token_exp"
+
+        /** 实测服务端 JWT 有效期 30 天（`exp - iat = 2592000`），本地保守取 29 天。 */
+        const val TOKEN_TTL_MS = 29L * 24 * 60 * 60 * 1000
+
+        /** 403 触发强制重登的冷却窗口，避免批量下载时逐章重复登录。 */
+        const val RELOGIN_COOLDOWN_MS = 60_000L
+
+        const val PREF_USERNAME_TITLE = "韩漫屋账号"
+        const val PREF_ACCOUNT_SUMMARY = "填写后自动登录（无需再操作）"
+        const val PREF_ACCOUNT_HINT =
+            "章节图片需要登录后才能不限次数阅读。\n\n" +
+                "填好「账号 + 密码」即可，取图时会自动登录并缓存令牌（约 30 天有效），" +
+                "期间无需重复输入。\n\n" +
+                "还没有账号？直接去 hmanwu.com 注册：只需用户名 + 密码，无需邮箱或验证码。"
+
+        const val PREF_PASSWORD_TITLE = "韩漫屋密码"
+        const val PREF_PASSWORD_SUMMARY = "仅保存在本机，用于自动登录"
+        const val PREF_PASSWORD_HINT =
+            "密码只写入本机扩展设置，用于向 hmanwu.com 换取访问令牌，不会上传到任何第三方。\n\n" +
+                "修改账号或密码后，已缓存的令牌会立即作废，下次取图时自动用新凭据重新登录。"
+
         const val MSG_NEED_LOGIN =
-            "今日免费阅读次数已用完（未登录每天仅 2 次）。请在「扩展设置」里登录韩漫屋账号后重试。"
+            "今日免费阅读次数已用完（未登录每天仅 2 次）。请在「扩展设置 → 韩漫屋」里填写账号和密码，之后会自动登录。"
 
         const val MSG_NOT_CRAWLED =
             "该章节在站点侧尚无图片（未爬取）。请换一章，或稍后再试。"
