@@ -83,18 +83,6 @@ EXTENSIONS = [
                "tachiyomi-zh.hanmanwu-v1.6.2.apk",
         "icon": "extensions/zh/hanmanwu/res/mipmap-xxxhdpi/ic_launcher.png",
     },
-    {
-        "pkg": "eu.kanade.tachiyomi.extension.zh.tutorialdemo",
-        "source_name": "教程示例",          # 图源页主名（可中文）
-        "lang": "zh",
-        "code": 106001,                     # ★ 必须与 APK 的 versionCode 一致
-        "version": "1.6.1",                 # ★ 必须与 APK 的 versionName 一致
-        "nsfw": 0,
-        "base_url": "https://example.com",
-        "apk": "extensions/zh/tutorialdemo/build/outputs/apk/release/"
-               "tachiyomi-zh.tutorialdemo-v1.6.1.apk",
-        "icon": "extensions/zh/tutorialdemo/res/mipmap-xxxhdpi/ic_launcher.png",
-    },
 ]
 
 

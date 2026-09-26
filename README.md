@@ -34,7 +34,7 @@ repo 分支（产物，由 publish.sh 自动生成）
 
 ## 添加一个新扩展
 
-1. 在 `extensions/<lang>/<模块名>/` 建工程（参考 `extensions/zh/tutorialdemo/`）
+1. 在 `extensions/<lang>/<模块名>/` 建工程（参考 `extensions/zh/kxmanhua/`）
    - `build.gradle.kts` 用 `keiyoushi { }` DSL
    - 源码里 `@Source class Xxx(override val name: String, override val lang: String, override val id: Long, override val baseUrl: String)`
      —— **这四个必须声明为主构造参数**，否则 KSP 报 fatal
